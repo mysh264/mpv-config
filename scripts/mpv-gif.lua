@@ -1,191 +1,243 @@
--- Original by Ruin0x11
--- Ported to Windows by Scheliux, Dragoner7
-
 -- Create animated GIFs with mpv
 -- Requires ffmpeg.
 -- Adapted from http://blog.pkh.me/p/21-high-quality-gif-with-ffmpeg.html
--- Usage: "b" to set start frame, "B" to set end frame, "Ctrl+b" to create.
-
-require 'mp.options'
+-- Usage: "g" to set start frame, "G" to set end frame, "Ctrl+g" to create.
 local msg = require 'mp.msg'
+local utils = require 'mp.utils'
 
+-- options
+require 'mp.options'
 local options = {
-    dir = "C:/Program Files/mpv/gifs",
-    rez = 600,
     fps = 15,
+    width = -1,
+    height = -1,
+    extension = "gif",
+    outputDirectory = "~/"
 }
+read_options(options, "gifgen")
 
-read_options(options, "gif")
-
-
-local fps
-
--- Check for invalid fps values
--- Can you believe Lua doesn't have a proper ternary operator in the year of our lord 2020?
-if options.fps ~= nil and options.fps >= 1 and options.fps < 30 then
-    fps = options.fps
-else
-    fps = 15
-end
+-- expand given path (i.e. ~/, ~~/, …)
+res, err = mp.command_native({"expand-path", options.outputDirectory})
+options.outputDirectory = res
 
 -- Set this to the filters to pass into ffmpeg's -vf option.
--- filters="fps=24,scale=320:-1:flags=spline"
-filters=string.format("fps=%s,scale='trunc(ih*dar/2)*2:trunc(ih/2)*2',setsar=1/1,scale=%s:-1:flags=spline", fps, options.rez) --change spline to lanczos depending on preference
-
--- Setup output directory
-output_directory=string.gsub(options.dir, '\"', '')
+-- filters="fps=24,scale=320:-1:flags=lanczos"
+filters = options.fps < 0 and "" or string.format("fps=%d,", options.fps)
+filters = filters .. string.format(
+    "scale=%d:%d:flags=lanczos",
+    options.width, options.height
+)
 
 start_time = -1
 end_time = -1
-palette="%TEMP%palette.png"
-
--- The roundabout way has to be used due to a some weird
--- behavior with %TEMP% on the subtitles= parameter in ffmpeg
--- on Windows–it needs to be quadruple backslashed
-subs = "C:/Users/%USERNAME%/AppData/Local/Temp/subs.srt"
+palette="/tmp/palette.png"
 
 function make_gif_with_subtitles()
-    make_gif_internal(true)
+make_gif_internal(true)
 end
 
 function make_gif()
-    make_gif_internal(false)
-end    
-
-function table_length(t)
-    local count = 0
-    for _ in pairs(t) do count = count + 1 end
-    return count
+make_gif_internal(false)
 end
 
+function get_path()
+-- TODO: improve detection of file paths (relative, windows, …)
+return utils.join_path(
+    mp.get_property("working-directory", ""),
+                       mp.get_property("path")
+)
+end
 
-function make_gif_internal(burn_subtitles)
-    local start_time_l = start_time
-    local end_time_l = end_time
-    if start_time_l == -1 or end_time_l == -1 or start_time_l >= end_time_l then
-        mp.osd_message("Invalid start/end time.")
-        return
-    end
+function get_gifname()
+-- then, make the gif
+local filename = mp.get_property("filename/no-ext")
+local file_path = options.outputDirectory .. "/" .. filename
 
-    mp.osd_message("Creating GIF.")
-
-    -- shell escape
-    function esc(s)
-        return string.gsub(s, '"', '"\\""')
-    end
-
-    function esc_for_sub(s)
-        s = string.gsub(s, [[\]], [[/]])
-        s = string.gsub(s, '"', '"\\""')
-        s = string.gsub(s, ":", [[\\:]])
-        s = string.gsub(s, "'", [[\\']])
-        return s
-    end
-
-    local pathname = mp.get_property("path", "")
-    local trim_filters = esc(filters)
-
-    local position = start_time_l
-    local duration = end_time_l - start_time_l
-
-    if burn_subtitles then
-        -- Determine currently active sub track
-
-        local i = 0
-        local tracks_count = mp.get_property_number("track-list/count")
-        local subs_array = {}
-        
-        -- check for subtitle tracks
-
-        while i < tracks_count do
-            local type = mp.get_property(string.format("track-list/%d/type", i))
-            local selected = mp.get_property(string.format("track-list/%d/selected", i))
-
-            -- if it's a sub track, save it
-
-            if type == "sub" then
-                local length = table_length(subs_array)
-                subs_array[length] = selected == "yes"
-            end
-            i = i + 1
+-- increment filename
+for i=0,999 do
+    local fn = string.format('%s_%03d.%s',file_path,i, options.extension)
+    if not file_exists(fn) then
+        gifname = fn
+        break
+        end
         end
 
-        if table_length(subs_array) > 0 then
-
-            local correct_track = 0
-
-            -- iterate through saved subtitle tracks until the correct one is found
-
-            for index, is_selected in pairs(subs_array) do
-                if (is_selected) then
-                    correct_track = index
-                end
+        if not gifname then
+            msg.warning("No available filename")
+            mp.osd_message('No available filenames!')
+            return nil
             end
 
-            trim_filters = trim_filters .. string.format(",subtitles=%s:si=%s", esc_for_sub(pathname), correct_track)
+            return gifname
+            end
 
-        end
+            function log_command_result(res, val, err)
+            if not (res and (val == nil or val["status"] == 0)) then
+                if val["stderr"] then
+                    if mp.get_property("options/terminal") == "no" then
+                        file = io.open(string.format("/tmp/mpv-gif-ffmpeg.%s.log", os.time()), "w")
+                        file:write(string.format("ffmpeg error %d:\n%s", val["status"], val["stderr"]))
+                        file:close()
+                        else
+                            msg.error(val["stderr"])
+                            end
+                            end
 
-    end
+                            msg.error("GIF generation was unsuccessful")
+                            mp.osd_message("error creating GIF")
+                            return -1
+                            end
+
+                            return 0
+                            end
+
+                            function get_tracks()
+                            -- retrieve information about currently selected tracks
+                            local tracks, err = utils.parse_json(mp.get_property("track-list"))
+                            if tracks == nil then
+                                msg.warning("Couldn't parse track-list")
+                                return
+                                end
+
+                                local video = nil
+                                local has_sub = false
+                                local sub = nil
+
+                                for _, track in ipairs(tracks) do
+                                    has_sub = has_sub or track["type"] == "sub"
+
+                                    if track["selected"] == true then
+                                        if track["type"] == "video" then
+                                            video = {id=track["id"]}
+                                            elseif track["type"] == "sub" then
+                                                sub = {id=track["id"], codec=track["codec"]}
+                                                end
+
+                                                end
+                                                end
+
+                                                return video, sub, has_sub
+                                                end
 
 
-    -- first, create the palette
-    args = string.format('ffmpeg -v warning -ss %s -t %s -i "%s" -vf "%s,palettegen" -y "%s"', position, duration, esc(pathname), esc(trim_filters), esc(palette))
-    msg.debug(args)
-    os.execute(args)
+                                                function make_gif_internal(burn_subtitles)
+                                                local start_time_l = start_time
+                                                local end_time_l = end_time
+                                                if start_time_l == -1 or end_time_l == -1 or start_time_l >= end_time_l then
+                                                    mp.osd_message("Invalid start/end time.")
+                                                    return
+                                                    end
 
-    -- then, make the gif
-    local filename = mp.get_property("filename/no-ext")
-    local file_path = output_directory .. "/" .. filename
+                                                    local sel_video, sel_sub, has_sub = get_tracks()
 
-    -- increment filename
-    for i=0,999 do
-        local fn = string.format('%s_%03d.gif',file_path,i)
-        if not file_exists(fn) then
-            gifname = fn
-            break
-        end
-    end
-    if not gifname then
-        mp.osd_message('No available filenames!')
-        return
-    end
+                                                    if sel_video == nil then
+                                                        mp.osd_message("GIF abort: no video")
+                                                        msg.info("No video selected")
+                                                        return
+                                                        end
 
-    local copyts = ""
 
-    if burn_subtitles then
-        copyts = "-copyts"
-    end
+                                                        msg.info("Creating GIF" .. (burn_subtitles and " (with subtitles)" or ""))
+                                                        mp.osd_message("Creating GIF" .. (burn_subtitles and " (with subtitles)" or ""))
 
-    args = string.format('ffmpeg -v warning -ss %s %s -t %s -i "%s" -i "%s" -lavfi "%s [x]; [x][1:v] paletteuse" -y "%s"', position, copyts, duration, esc(pathname), esc(palette), esc(trim_filters), esc(gifname))
-    os.execute(args)
+                                                        local pathname = get_path()
 
-    local ok, err, code = os.rename(gifname, gifname)
-	if ok then
-	    msg.info("GIF created: " .. gifname)
-	    mp.osd_message("GIF created: " .. gifname)
-	else
-	    mp.osd_message("Error creating file, check CLI for more info.")
-	end
-end
+                                                        subtitle_filter = ""
+                                                        -- add subtitles only for final rendering as it slows down significantly
+                                                        if burn_subtitles and has_sub then
+                                                            -- TODO: implement usage of different subtitle formats (i.e. bitmap ones, …)
+                                                            sid = (sel_sub == nil and 0 or sel_sub["id"] - 1)  -- mpv starts counting subtitles with one
+                                                            subtitle_filter = string.format(",subtitles='%s':si=%d", ffmpeg_esc(pathname), sid)
+                                                            elseif burn_subtitles then
+                                                                msg.info("There are no subtitle tracks")
+                                                                mp.osd_message("GIF: ignoring subtitle request")
+                                                                end
 
-function set_gif_start()
-    start_time = mp.get_property_number("time-pos", -1)
-    mp.osd_message("GIF Start: " .. start_time)
-end
 
-function set_gif_end()
-    end_time = mp.get_property_number("time-pos", -1)
-    mp.osd_message("GIF End: " .. end_time)
-end
+                                                                local position = start_time_l
+                                                                local duration = end_time_l - start_time_l
 
-function file_exists(name)
-    local f=io.open(name,"r")
-    if f~=nil then io.close(f) return true else return false end
-end
+                                                                local gifname = get_gifname()
+                                                                if gifname == nil then
+                                                                    return
+                                                                    end
 
--- all keybindings here are set to nil on purpose 'cause I modified the keybindings (in input.conf)
-mp.add_key_binding(nil, "set_gif_start", set_gif_start)
-mp.add_key_binding(nil, "set_gif_end", set_gif_end)
-mp.add_key_binding(nil, "make_gif", make_gif)
-mp.add_key_binding(nil, "make_gif_with_subtitles", make_gif_with_subtitles)  -- making GIFs with subtitles doesn't seem to work
+                                                                    -- set arguments
+                                                                    v_track = string.format("[0:v:%d] ", sel_video["id"] - 1)
+                                                                    local filter_pal = v_track .. filters .. ",palettegen=stats_mode=diff"
+                                                                    local args_palette = {
+                                                                        "ffmpeg", "-v", "warning",
+                                                                        "-ss", tostring(position), "-t", tostring(duration),
+                                                                        "-i", pathname,
+                                                                        "-vf", filter_pal,
+                                                                        "-y", palette
+                                                                    }
+
+                                                                    local filter_gif = v_track .. filters .. subtitle_filter .. " [x]; "
+                                                                    filter_gif = filter_gif .. "[x][1:v] paletteuse=dither=bayer:bayer_scale=5:diff_mode=rectangle"
+                                                                    local args_gif = {
+                                                                        "ffmpeg", "-v", "warning",
+                                                                        "-ss", tostring(position), "-t", tostring(duration),  -- define which part to use
+                                                                        "-copyts",  -- otherwise ss can't be reused
+                                                                        "-i", pathname, "-i", palette,  -- open files
+                                                                        "-an",  -- remove audio
+                                                                        "-ss", tostring(position),  -- required for burning subtitles
+                                                                        "-lavfi", filter_gif,
+                                                                        "-y", gifname  -- output
+                                                                    }
+
+                                                                    -- first, create the palette
+                                                                    mp.command_native_async({
+                                                                        name="subprocess", args=args_palette, capture_stdout=true, capture_stderr=true
+                                                                    }, function(res, val, err)
+                                                                    if log_command_result(res, val, err) ~= 0 then
+                                                                        return
+                                                                        end
+
+                                                                        msg.debug("Generated palette")
+
+                                                                        mp.command_native_async({
+                                                                            name="subprocess", args=args_gif, capture_stdout=true, capture_stderr=true
+                                                                        }, function(res, val, err)
+                                                                        if log_command_result(res, val, err) ~= 0 then
+                                                                            return
+                                                                            end
+
+                                                                            msg.info(string.format("GIF created - %s", gifname))
+                                                                            mp.osd_message(string.format("GIF created - %s", gifname), 2)
+                                                                            end)
+                                                                        end)
+                                                                    end
+
+                                                                    function set_gif_start()
+                                                                    start_time = mp.get_property_number("time-pos", -1)
+                                                                    mp.osd_message("GIF Start: " .. start_time)
+                                                                    end
+
+                                                                    function set_gif_end()
+                                                                    end_time = mp.get_property_number("time-pos", -1)
+                                                                    mp.osd_message("GIF End: " .. end_time)
+                                                                    end
+
+                                                                    function file_exists(name)
+                                                                    local f=io.open(name,"r")
+                                                                    if f~=nil then io.close(f) return true else return false end
+                                                                        end
+
+                                                                        function get_containing_path(str,sep)
+                                                                        sep=sep or package.config:sub(1,1)
+                                                                        return str:match("(.*"..sep..")")
+                                                                        end
+
+                                                                        function ffmpeg_esc(s)
+                                                                        -- escape string to be used in ffmpeg arguments (i.e. filenames in filter)
+                                                                        s = string.gsub(s, "\\", "\\\\")
+                                                                        s = string.gsub(s, ":", "\\:")
+                                                                        s = string.gsub(s, "'", "\\'")
+                                                                        return s
+                                                                        end
+
+                                                                        mp.add_key_binding("g", "set_gif_start", set_gif_start)
+                                                                        mp.add_key_binding("G", "set_gif_end", set_gif_end)
+                                                                        mp.add_key_binding("Ctrl+g", "make_gif", make_gif)
+                                                                        mp.add_key_binding("Ctrl+G", "make_gif_with_subtitles", make_gif_with_subtitles)
