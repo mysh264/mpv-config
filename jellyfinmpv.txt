@@ -1,0 +1,4 @@
+profile=fast
+vo=libmpv
+hwdec=auto
+gpu-api=auto
